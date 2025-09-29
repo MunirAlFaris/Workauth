@@ -1,0 +1,185 @@
+<!doctype html>
+
+<html lang="ar">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>تجربة تسجيل الحضور ببصمة (WebAuthn) - محلي</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Arial;direction:rtl;padding:20px;background:#f7fafc;color:#0f172a}
+    h1{font-size:20px;margin-bottom:6px}
+    .box{background:#fff;padding:16px;border-radius:8px;box-shadow:0 2px 6px rgba(2,6,23,0.06);margin-bottom:16px}
+    label{display:block;margin:8px 0 4px}
+    input,button,select{padding:8px;width:100%;box-sizing:border-box;border:1px solid #e2e8f0;border-radius:6px}
+    button{cursor:pointer;background:#0ea5a4;color:#fff;border:none}
+    .muted{color:#64748b;font-size:13px}
+    pre{background:#0f172a;color:#e6eef6;padding:12px;border-radius:6px;overflow:auto}
+    .row{display:flex;gap:8px}
+    .col{flex:1}
+  </style>
+</head>
+<body>
+  <div id="envWarning" style="display:none;background:#fff7ed;color:#9a3412;border:1px solid #fdba74;padding:12px;border-radius:8px;margin-bottom:14px"></div>
+  <h1>نموذج محلي: إضافة عامل + تحقق ببصمة (WebAuthn)</h1>
+  <p class="muted">ملاحظة: هذه نسخة تجريبية للمحاكاة محلياً. لتعمل البصمة افتح عبر <strong>http://localhost</strong> أو https.</p>  <div class="box">
+    <h2>إضافة عامل (تسجيل جهاز ببصمة)</h2>
+    <label>اسم العامل</label>
+    <input id="empName" placeholder="مثال: محمد علي" />
+    <label>رمز / كود العامل (مطلوب)</label>
+    <input id="empCode" placeholder="مثال: EMP001" />
+    <label>وصف الجهاز (اختياري)</label>
+    <input id="deviceLabel" placeholder="موبايل سامسونج - الجهاز الشخصي" />
+    <div style="height:8px"></div>
+    <button id="btnEnroll">تسجيل بصمتي (Enroll)</button>
+    <p class="muted">بعد الضغط ستظهر نافذة النظام لطلب البصمة/FaceID على الجهاز. عند النجاح سيخزن demo الـ credentialId محليًا.</p>
+  </div>  <div class="box">
+    <h2>التحقق عبر البصمة (تسجيل حضور)</h2>
+    <p class="muted">اضغط "تحقق ببصمة" وسنحاول استخدام أي credential مخزن محلياً. إن نجح، سيظهر بيانات العامل المرتبط.</p>
+    <div class="row">
+      <div class="col"><button id="btnAuth">تحقق ببصمة</button></div>
+      <div class="col"><button id="btnList">عرض العاملين المسجّلين</button></div>
+    </div>
+    <div id="authResult" style="margin-top:12px"></div>
+  </div>  <div class="box">
+    <h2>سجل (محلي)</h2>
+    <p class="muted">البيانات تُخزن في LocalStorage فقط لهذا الـ demo.</p>
+    <pre id="storeView">لا شيء</pre>
+  </div><script>
+function bufferToBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let str = '';
+  for (let i=0;i<bytes.byteLength;i++) str += String.fromCharCode(bytes[i]);
+  return btoa(str).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function base64UrlToBuffer(base64url) {
+  base64url = base64url.replace(/-/g,'+').replace(/_/g,'/');
+  while (base64url.length % 4) base64url += '=';
+  const str = atob(base64url);
+  const buf = new Uint8Array(str.length);
+  for (let i=0;i<str.length;i++) buf[i]=str.charCodeAt(i);
+  return buf.buffer;
+}
+
+function randBuf(len=32){
+  const b = new Uint8Array(len);
+  crypto.getRandomValues(b);
+  return b.buffer;
+}
+
+function readStore(){
+  try {
+    return JSON.parse(localStorage.getItem('webauthn_demo_creds')||'[]');
+  } catch(e){ return []; }
+}
+function writeStore(arr){
+  localStorage.setItem('webauthn_demo_creds', JSON.stringify(arr));
+  refreshStoreView();
+}
+function refreshStoreView(){
+  const arr = readStore();
+  const lines = arr.map(c=>`${c.empCode} | ${c.name} | credential: ${c.credId} | device: ${c.deviceLabel} | created: ${new Date(c.createdAt).toLocaleString()}`);
+  document.getElementById('storeView').textContent = lines.join('\n') || 'لا يوجد سجلات';
+}
+
+/* Enroll */
+document.getElementById('btnEnroll').addEventListener('click', async ()=>{
+  const name = document.getElementById('empName').value.trim();
+  const code = document.getElementById('empCode').value.trim();
+  const deviceLabel = document.getElementById('deviceLabel').value.trim()||'unknown';
+  if(!name || !code){ alert('ادخل اسم العامل ورمزه (code)'); return; }
+
+  if(!window.PublicKeyCredential){
+    alert('المتصفح لا يدعم WebAuthn.');
+    return;
+  }
+
+  try {
+    const publicKey = {
+      challenge: randBuf(32),
+      rp: { name: "Demo Company" },
+      user: {
+        id: new TextEncoder().encode(code),
+        name: code,
+        displayName: name
+      },
+      pubKeyCredParams: [
+        { type: "public-key", alg: -7 },
+        { type: "public-key", alg: -257 }
+      ],
+      authenticatorSelection: { userVerification: "preferred" },
+      timeout: 60000,
+      attestation: "none"
+    };
+
+    const credential = await navigator.credentials.create({ publicKey });
+    if(!credential){ alert('لم يتم إنشاء الاعتماد.'); return; }
+
+    const credId = bufferToBase64Url(credential.rawId);
+    const store = readStore();
+    if(store.find(s=>s.credId===credId)){
+      alert('هذا الجهاز مسجل من قبل.'); return;
+    }
+
+    store.push({ credId, name, empCode: code, deviceLabel, createdAt: Date.now() });
+    writeStore(store);
+
+    alert('تم التسجيل محلياً!');
+  } catch(err){
+    console.error(err);
+    alert('خطأ أثناء التسجيل: ' + (err.message||err));
+  }
+});
+
+/* Auth */
+document.getElementById('btnAuth').addEventListener('click', async ()=>{
+  const store = readStore();
+  if(store.length===0){ alert('لا توجد اعتماديات.'); return; }
+  const allowed = store.map(s=>({ id: base64UrlToBuffer(s.credId), type: 'public-key' }));
+
+  try {
+    const publicKey = { challenge: randBuf(32), allowCredentials: allowed, timeout:60000, userVerification:'preferred' };
+    const assertion = await navigator.credentials.get({ publicKey });
+    if(!assertion){ alert('لم نحصل على نتيجة'); return; }
+
+    const usedId = bufferToBase64Url(assertion.rawId);
+    const matched = store.find(s=>s.credId === usedId);
+    const out = document.getElementById('authResult');
+    if(matched){
+      out.innerHTML = `<div style="padding:10px;background:#ecfccb;border-radius:6px">
+        <strong>تم التحقق!</strong><br/>
+        ${matched.name} (${matched.empCode})<br/>
+        <span class="muted">الجهاز: ${matched.deviceLabel}</span><br/>
+        <span class="muted">${new Date().toLocaleString()}</span>
+      </div>`;
+    } else {
+      out.innerHTML = `<div style="padding:10px;background:#fecaca;border-radius:6px"><strong>لم يتم التعرف على الاعتماد</strong></div>`;
+    }
+    refreshStoreView();
+  } catch(err){
+    console.error(err);
+    alert('خطأ أثناء المصادقة: ' + (err.message||err));
+  }
+});
+
+document.getElementById('btnList').addEventListener('click', ()=>{
+  const store = readStore();
+  if(store.length===0){ alert('لا يوجد مسجلون'); return; }
+  alert(store.map(s=>`${s.empCode} - ${s.name} - ${s.deviceLabel}`).join('\n'));
+});
+
+refreshStoreView();
+// --- بيئة التشغيل: تنبيه مبكر
+(function(){
+  const warn = document.getElementById('envWarning');
+  const msgs = [];
+  if (!('PublicKeyCredential' in window)) msgs.push('المتصفح لا يدعم WebAuthn (PublicKeyCredential).');
+  if (!window.isSecureContext) msgs.push('يجب فتح الصفحة عبر https أو http://localhost (الآن ليست في سياق آمن).');
+  try{ if (window.top !== window.self) msgs.push('الصفحة تعمل داخل iframe مقيّد (Permissions Policy تمنع WebAuthn). افتح الملف مباشرة في نافذة عليا.'); }catch(e){ msgs.push('الصفحة داخل إطار مقيّد (X-Frame-Options/COOP).'); }
+  if (msgs.length){
+    warn.style.display='block';
+    warn.innerHTML = '<strong>تنبيه بيئة التشغيل:</strong><br>' + msgs.map(m=>'• '+m).join('<br>') +
+      '<div class="muted" style="margin-top:8px">طريقة التشغيل المقترحة: شغّل خادماً محلياً ثم افتح http://localhost/...<br>مثال: <code>python -m http.server 8000</code> أو <code>npx http-server .</code></div>';
+  }
+})();
+</script></body>
+</html>
